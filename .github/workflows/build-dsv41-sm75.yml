@@ -21,7 +21,7 @@ env:
 
 jobs:
   windows:
-    name: Windows x86-64 / CUDA 12.9 / sm_75
+    name: Windows x86-64 / CUDA 13.0 / sm_75
     runs-on: windows-2022
     timeout-minutes: 240
 
@@ -44,10 +44,10 @@ jobs:
       - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Install CUDA 12.9.1
+      - name: Install CUDA 13.0.0
         uses: Jimver/cuda-toolkit@v0.2.36
         with:
-          cuda: "12.9.1"
+          cuda: "13.0.0"
           method: local
 
       - name: Install Python packaging dependency
@@ -129,15 +129,16 @@ jobs:
             --backend cuda `
             --version $version `
             --platform windows-x86_64 `
-            --variant cuda12 `
+            --variant cuda13 `
             --arch sm_75 `
+            --min-driver nvidia=580.65 `
             --build-id (Get-Content ..\SOURCE_COMMIT.txt) `
             --entrypoint strata-dsv41.exe `
             --out packages
 
           if ($LASTEXITCODE -ne 0) { throw "Packaging failed" }
 
-          $packageDir = "packages/$version-windows-x86_64-cuda-cuda12"
+          $packageDir = "packages/$version-windows-x86_64-cuda-cuda13"
 
           python packaging/package_engine.py --verify $packageDir
           if ($LASTEXITCODE -ne 0) { throw "Package verification failed" }
@@ -164,7 +165,7 @@ jobs:
       - name: Upload Windows archive
         uses: actions/upload-artifact@v4
         with:
-          name: strata-dsv41-windows-x86_64-cuda12-sm75
+          name: strata-dsv41-windows-x86_64-cuda13-sm75
           retention-days: 3
           path: |
             source/dist/*.tar.gz
