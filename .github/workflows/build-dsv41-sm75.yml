@@ -1,258 +1,45 @@
-name: Build strata-dsv41 for sm_70
+# Build strata-dsv41 for sm_75 (Turing: RTX 20 / T4 / RTX 8000, 含 16GB Tesla T10)
+# 基于 jankais3r/dsv41-sm70 的 CI 改造: 只保留 Windows job, 源码用 Niko1221/Strata 官方 tag,
+# arch 75-real, 无 Pascal 补丁 (#4176/#4273 证实 sm_75 无需改源码)。
+# 用法: 在 GitHub 上 Fork 本仓库(任何空仓库亦可) → 把本文件放到 .github/workflows/ →
+#       Actions 里 Run workflow (source_ref 默认 v0.2.14) → 下载 artifact 里的 tar.gz。
+name: Build strata-dsv41 for sm_75
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - ".github/workflows/build-dsv41-sm70.yml"
+    inputs:
+      source_ref:
+        description: "Strata 源码 tag (需与本机 Strata 版本的引擎版本对应)"
+        required: false
+        default: "v0.2.14"
 
 permissions:
   contents: read
 
 env:
-  # Change this only if you deliberately want a different source.
-  SOURCE_REPOSITORY: rafal-prasal/Strata
-  SOURCE_REF: FEATURE/dsv41-pascal
+  SOURCE_REPOSITORY: Niko1221/Strata
 
 jobs:
-  resolve-source:
-    name: Resolve source commit
-    runs-on: ubuntu-24.04
-    outputs:
-      commit: ${{ steps.commit.outputs.sha }}
-    steps:
-      - name: Check out the requested fork and branch
-        uses: actions/checkout@v4
-        with:
-          repository: rafal-prasal/Strata
-          ref: FEATURE/dsv41-pascal
-          path: source
-          persist-credentials: false
-
-      - name: Record exact commit
-        id: commit
-        shell: bash
-        run: |
-          set -euo pipefail
-          sha="$(git -C source rev-parse HEAD)"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "Building source commit: $sha"
-
-  linux:
-    name: Linux x86-64 / CUDA 12.9 / sm_70
-    needs: resolve-source
-    runs-on: ubuntu-24.04
-    timeout-minutes: 180
-
-    container:
-      image: nvidia/cuda:12.9.1-devel-ubuntu24.04
-
-    steps:
-      - name: Install build tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            --no-install-recommends \
-            build-essential \
-            ca-certificates \
-            git \
-            cmake \
-            ninja-build \
-            python3 \
-            python3-cryptography \
-            binutils \
-            libgomp1 \
-            libatomic1
-          nvcc --version
-          cmake --version
-
-      - name: Check out the resolved source commit
-        uses: actions/checkout@v4
-        with:
-          repository: rafal-prasal/Strata
-          ref: ${{ needs.resolve-source.outputs.commit }}
-          path: source
-          persist-credentials: false
-
-      - name: Configure and build
-        working-directory: source
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cmake -S . -B build-dsv41 -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DSTRATA_ENABLE_CUDA=ON \
-            -DSTRATA_BUILD_TESTS=OFF \
-            -DSTRATA_BUILD_DSV41=ON \
-            -DSTRATA_NATIVE_EXPERTS=ON \
-            -DSTRATA_PORTABLE=ON \
-            -DSTRATA_EXPERIMENTAL_SM60=ON \
-            '-DCMAKE_CUDA_ARCHITECTURES=61-real;70-real' \
-            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
-            -DCMAKE_SKIP_BUILD_RPATH=OFF \
-            '-DCMAKE_INSTALL_RPATH=$ORIGIN'
-
-          cmake --build build-dsv41 \
-            --target strata-dsv41 \
-            --parallel 4
-
-          test -x build-dsv41/strata-dsv41
-
-      - name: Check that the executable contains sm_61 and sm_70 code
-        working-directory: source
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cuobjdump --list-elf build-dsv41/strata-dsv41 \
-            > cuobjdump-elf.txt
-
-          cat cuobjdump-elf.txt
-
-          for arch in sm_61 sm_70; do
-            if ! grep -q "$arch" cuobjdump-elf.txt; then
-              echo "ERROR: cuobjdump did not find a $arch ELF image."
-              exit 1
-            fi
-          done
-
-      - name: Collect libraries and create tarball
-        working-directory: source
-        shell: bash
-        env:
-          SOURCE_COMMIT: ${{ needs.resolve-source.outputs.commit }}
-        run: |
-          set -euo pipefail
-
-          # Read the engine version from the checked-out CMake project.
-          version="$(
-            python3 -c '
-          import pathlib, re
-          text = pathlib.Path("CMakeLists.txt").read_text(encoding="utf-8")
-          match = re.search(
-              r"project\s*\(\s*strata\s+VERSION\s+([0-9.]+)",
-              text,
-              re.IGNORECASE,
-          )
-          if not match:
-              raise SystemExit("Could not determine the Strata version")
-          print(match.group(1))
-          '
-          )"
-
-          echo "Engine version: $version"
-          mkdir -p stage packages dist
-
-          cp build-dsv41/strata-dsv41 stage/
-          cp cuobjdump-elf.txt dist/
-          printf '%s\n' "$SOURCE_COMMIT" > dist/SOURCE_COMMIT.txt
-
-          # The collector copies non-system CUDA libraries and records
-          # the system libraries that the target machine must provide.
-          python3 packaging/collect_libs.py \
-            --binary build-dsv41/strata-dsv41 \
-            --search /usr/local/cuda/lib64 \
-            --out stage \
-            --also 'libcublasLt.so*'
-
-          # This produces a package directory with an unsigned manifest.
-          python3 packaging/package_engine.py \
-            --src stage \
-            --backend cuda \
-            --version "$version" \
-            --platform linux-x86_64 \
-            --variant cuda12 \
-            --arch sm_61 --arch sm_70 \
-            --build-id "$SOURCE_COMMIT" \
-            --entrypoint strata-dsv41 \
-            --include SYSTEM-LIBS.txt \
-            --out packages
-
-          package_dir="packages/${version}-linux-x86_64-cuda-cuda12"
-
-          python3 packaging/package_engine.py \
-            --verify "$package_dir"
-
-          # Creates the release-style tar.gz and a feed-entry JSON file.
-          python3 packaging/feed_tool.py pack-engine \
-            "$package_dir" \
-            --out dist \
-            --prefix strata-dsv41 \
-            --url-prefix=
-
-          (
-            cd dist
-            sha256sum ./*.tar.gz > SHA256SUMS.txt
-            ls -lh
-          )
-
-      - name: Upload Linux archive
-        uses: actions/upload-artifact@v4
-        with:
-          name: strata-dsv41-linux-x86_64-cuda12-sm61-sm70
-          path: |
-            source/dist/*.tar.gz
-            source/dist/*.entry.json
-            source/dist/SHA256SUMS.txt
-            source/dist/SOURCE_COMMIT.txt
-            source/dist/cuobjdump-elf.txt
-          if-no-files-found: error
-
   windows:
-    name: Windows x86-64 / CUDA 12.9 / sm_70
-    needs: resolve-source
+    name: Windows x86-64 / CUDA 12.9 / sm_75
     runs-on: windows-2022
     timeout-minutes: 240
 
     steps:
-      - name: Check out the resolved source commit
+      - name: Check out the requested source tag
         uses: actions/checkout@v4
         with:
-          repository: rafal-prasal/Strata
-          ref: ${{ needs.resolve-source.outputs.commit }}
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ inputs.source_ref }}
           path: source
           persist-credentials: false
+          submodules: recursive
 
-      - name: Patch MoeWin kernel for Pascal
+      - name: Record source commit
         working-directory: source
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
-
-          $file = "src/dsv41/vendor/moe_win.cu"
-          $text = [System.IO.File]::ReadAllText(
-            (Resolve-Path $file).Path
-          )
-
-          $pattern = '\bconst\s+__grid_constant__\s+MoeWin\s+w\b'
-          $matchesFound = [regex]::Matches($text, $pattern)
-
-          if ($matchesFound.Count -ne 1) {
-            throw "Expected exactly one MoeWin grid-constant parameter; found $($matchesFound.Count). Check whether the source has changed."
-          }
-
-          $patched = [regex]::Replace(
-            $text,
-            $pattern,
-            "const MoeWin w"
-          )
-
-          # Write UTF-8 without a byte-order mark.
-          $utf8 = [System.Text.UTF8Encoding]::new($false)
-          [System.IO.File]::WriteAllText(
-            (Resolve-Path $file).Path,
-            $patched,
-            $utf8
-          )
-
-          # Save the actual change alongside the build artifacts.
-          git diff -- $file | Out-File -Encoding utf8 "moe-win-sm61.patch"
-          if ($LASTEXITCODE -ne 0) { throw "Could not generate patch" }
-
-          Get-Content "moe-win-sm61.patch"
+          git rev-parse HEAD | Tee-Object -FilePath ..\SOURCE_COMMIT.txt
 
       - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
@@ -278,12 +65,6 @@ jobs:
           nvcc --version
           if ($LASTEXITCODE -ne 0) { throw "nvcc is unavailable" }
 
-          cmake --version
-          if ($LASTEXITCODE -ne 0) { throw "CMake is unavailable" }
-
-          ninja --version
-          if ($LASTEXITCODE -ne 0) { throw "Ninja is unavailable" }
-
           cmake -S . -B build-dsv41 -G Ninja `
             "-DCMAKE_BUILD_TYPE=Release" `
             "-DSTRATA_ENABLE_CUDA=ON" `
@@ -291,8 +72,8 @@ jobs:
             "-DSTRATA_BUILD_DSV41=ON" `
             "-DSTRATA_NATIVE_EXPERTS=ON" `
             "-DSTRATA_PORTABLE=ON" `
-            "-DSTRATA_EXPERIMENTAL_SM60=ON" `
-            "-DCMAKE_CUDA_ARCHITECTURES=61-real;70-real" `
+            "-DCMAKE_CUDA_ARCHITECTURES=75-real" `
+            "-DCMAKE_CUDA_RUNTIME_LIBRARY=Shared" `
             "-DCUDAToolkit_ROOT=$env:CUDA_PATH" `
             "-DCMAKE_CUDA_COMPILER=$env:CUDA_PATH/bin/nvcc.exe"
 
@@ -305,7 +86,7 @@ jobs:
             throw "The expected executable was not produced"
           }
 
-      - name: Check that the executable contains sm_61 and sm_70 code
+      - name: Check that the executable contains sm_75 code
         working-directory: source
         shell: pwsh
         run: |
@@ -317,17 +98,13 @@ jobs:
           $dump | Set-Content -Encoding utf8 "cuobjdump-elf.txt"
           $dump | Write-Host
 
-          foreach ($arch in @("sm_61", "sm_70")) {
-            if (-not (($dump -join "`n") -match $arch)) {
-              throw "cuobjdump did not find an $arch ELF image"
-            }
+          if (-not (($dump -join "`n") -match "sm_75")) {
+            throw "cuobjdump did not find an sm_75 ELF image"
           }
 
       - name: Collect DLLs and create tarball
         working-directory: source
         shell: pwsh
-        env:
-          SOURCE_COMMIT: ${{ needs.resolve-source.outputs.commit }}
         run: |
           $ErrorActionPreference = "Stop"
 
@@ -343,7 +120,7 @@ jobs:
 
           Copy-Item "build-dsv41/strata-dsv41.exe" "stage/"
           Copy-Item "cuobjdump-elf.txt" "dist/"
-          Set-Content -Encoding ascii "dist/SOURCE_COMMIT.txt" $env:SOURCE_COMMIT
+          Copy-Item "..\SOURCE_COMMIT.txt" "dist/SOURCE_COMMIT.txt"
 
           # package_engine.py scans PE imports and copies missing DLLs
           # from CUDA_PATH and PATH into the package.
@@ -353,8 +130,8 @@ jobs:
             --version $version `
             --platform windows-x86_64 `
             --variant cuda12 `
-            --arch sm_61 --arch sm_70 `
-            --build-id $env:SOURCE_COMMIT `
+            --arch sm_75 `
+            --build-id (Get-Content ..\SOURCE_COMMIT.txt) `
             --entrypoint strata-dsv41.exe `
             --out packages
 
@@ -387,12 +164,12 @@ jobs:
       - name: Upload Windows archive
         uses: actions/upload-artifact@v4
         with:
-          name: strata-dsv41-windows-x86_64-cuda12-sm61-sm70
+          name: strata-dsv41-windows-x86_64-cuda12-sm75
+          retention-days: 3
           path: |
             source/dist/*.tar.gz
             source/dist/*.entry.json
             source/dist/SHA256SUMS.txt
             source/dist/SOURCE_COMMIT.txt
             source/dist/cuobjdump-elf.txt
-            source/moe-win-sm61.patch
           if-no-files-found: error
